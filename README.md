@@ -1,0 +1,69 @@
+# NIH RePORTER connector
+
+An MCP server that lets Claude search [NIH RePORTER](https://reporter.nih.gov): every NIH-funded grant since 1985, with PIs, organizations, dollars, abstracts, and linked PubMed IDs. It calls the public RePORTER v2 API, which needs no key.
+
+## Tools
+
+| Tool | What it answers |
+|---|---|
+| `search_projects` | "Which NIAID R01s on pediatric TB are at Illinois institutions?" Filter by text, PI, org, city/state/country, fiscal year, IC, activity code, application type, FOA, dates, dollar range. |
+| `get_project` | Full record for one grant (abstract, program officer, study section, IC split) plus every fiscal year's award amount. Takes an `appl_id` or a project number, full or core. |
+| `summarize_funding` | Dollar totals grouped by IC, organization, state, country, fiscal year, mechanism, contact PI, or project. "How much did FIC put into Uganda by year?" |
+| `find_investigator` | Turns a name into RePORTER profile IDs so two Jane Smiths don't get merged. |
+| `get_publications` | PMIDs linked to a grant, or grants an article cites. Pair with the PubMed connector for titles. |
+
+Things the tools account for, so the numbers come out right:
+
+- RePORTER keeps one record per project per fiscal year. A 5-year R01 is 5 records.
+- `summarize_funding` drops subproject records by default. A P01 or U54 parent already includes its subprojects' dollars, so counting both doubles the total.
+- The API caps any search at 15,000 records. When a summary hits `max_records` before the end, the reply starts with `PARTIAL` and gives the share it covered.
+- NIH asks for no more than 1 request per second. The client spaces requests 1 second apart and retries 429s and 5xx errors up to 3 times. A 5,000-record summary takes about 10 seconds.
+
+## Run it
+
+```bash
+npm install
+npm test          # 21 tests against a fake RePORTER API
+npm run build
+```
+
+### As a claude.ai custom connector (Cloudflare Workers)
+
+```bash
+npx wrangler login
+npm run deploy
+```
+
+Wrangler prints the URL. In claude.ai, go to Settings → Connectors → Add custom connector and enter `https://nih-reporter-mcp.<your-subdomain>.workers.dev/mcp`. No auth is needed because the data is public. Anyone with the URL can use it, and the only cost is Workers requests on your account (the free tier covers 100,000 per day).
+
+### Locally, in Claude Desktop or Claude Code
+
+```bash
+npm run build
+claude mcp add nih-reporter -- node /path/to/repo/dist/stdio.js
+```
+
+For Claude Desktop, add to `claude_desktop_config.json`:
+
+```json
+{ "mcpServers": { "nih-reporter": { "command": "node", "args": ["/path/to/repo/dist/stdio.js"] } } }
+```
+
+## Layout
+
+- `src/reporter.ts`: API client, pacing, retries, paging
+- `src/tools.ts`: the five tools and the filter-to-criteria mapping
+- `src/format.ts`: how projects are written out for Claude
+- `src/worker.ts`: Cloudflare Worker, stateless Streamable HTTP at `/mcp`
+- `src/stdio.ts`: local stdio entry point
+
+## Not yet checked against the live API
+
+The tests use recorded-shape responses, not the real API, because the environment this was built in couldn't reach `api.reporter.nih.gov`. These request details come from the RePORTER docs and still need one live check each after deploy:
+
+1. `project_nums` wildcards (`*R01AI123456*`), which `get_project` uses for funding history
+2. The `foa` criterion for funding opportunity numbers
+3. `exclude_fields` names (`AbstractText`, `PhrText`, `Terms`, `PrefTerms`). If these are wrong, results still come back, just larger.
+4. `sort_field` values `award_amount`, `project_start_date`, `project_end_date`
+
+A quick test after deploy: ask Claude to look up a PI you know with `find_investigator`, then open one with `get_project` and confirm the funding history matches the RePORTER website.
