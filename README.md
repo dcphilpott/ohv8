@@ -6,7 +6,8 @@ An MCP server that lets Claude search [NIH RePORTER](https://reporter.nih.gov): 
 
 | Tool | What it answers |
 |---|---|
-| `search_projects` | "Which NIAID R01s on pediatric TB are at Illinois institutions?" Filter by text, PI, org, city/state/country, fiscal year, IC, activity code, application type, FOA, dates, dollar range. |
+| `search_projects` | Raw passthrough to `POST /v2/projects/search`. `criteria`, `include_fields`, `offset`, `limit` (max 500) and sort go to RePORTER as-is; the reply is RePORTER's JSON including `meta.total`. Default fields: ProjectNum, FiscalYear, ActivityCode, ProjectTitle, Organization, PrincipalInvestigators, ProjectStartDate, ProjectEndDate. Built for bulk pulls: ~20 people per call in `pi_names`. |
+| `find_projects` | "Which NIAID R01s on pediatric TB are at Illinois institutions?" Filter by text, PI, org, city/state/country, fiscal year, IC, activity code, application type, FOA, dates, dollar range. |
 | `get_project` | Full record for one grant (abstract, program officer, study section, IC split) plus every fiscal year's award amount. Takes an `appl_id` or a project number, full or core. |
 | `summarize_funding` | Dollar totals grouped by IC, organization, state, country, fiscal year, mechanism, contact PI, or project. "How much did FIC put into Uganda by year?" |
 | `find_investigator` | Turns a name into RePORTER profile IDs so two Jane Smiths don't get merged. |
@@ -23,7 +24,7 @@ Things the tools account for, so the numbers come out right:
 
 ```bash
 npm install
-npm test          # 21 tests against a fake RePORTER API
+npm test          # 25 tests against a fake RePORTER API
 npm run build
 ```
 

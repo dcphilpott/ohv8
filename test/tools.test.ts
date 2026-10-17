@@ -2,7 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { describe, expect, it, vi } from "vitest";
 import { type Project, ReporterClient } from "../src/reporter.js";
-import { buildCriteria, buildServer, toCoreProjectNum } from "../src/tools.js";
+import { buildCriteria, buildServer, DEFAULT_FIELDS, toCoreProjectNum } from "../src/tools.js";
 
 function proj(over: Partial<Project> & { appl_id: number }): Project {
   return {
@@ -136,11 +136,12 @@ describe("ReporterClient", () => {
 });
 
 describe("MCP tools", () => {
-  it("lists all five tools", async () => {
+  it("lists all six tools", async () => {
     const mcp = await connect(fakeApi(() => page([])).client);
     const { tools } = await mcp.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
       "find_investigator",
+      "find_projects",
       "get_project",
       "get_publications",
       "search_projects",
@@ -148,13 +149,13 @@ describe("MCP tools", () => {
     ]);
   });
 
-  it("search_projects sends slim criteria and formats results", async () => {
+  it("find_projects sends slim criteria and formats results", async () => {
     const { client, calls } = fakeApi(() => ({
       ...page([proj({ appl_id: 10901234 })], 37),
       meta: { total: 37, offset: 0, limit: 25, properties: { URL: "https://reporter.nih.gov/search/abc/projects" } },
     }));
     const mcp = await connect(client);
-    const { text, isError } = await call(mcp, "search_projects", { text: "tuberculosis", org_states: ["IL"], sort_by: "award_amount" });
+    const { text, isError } = await call(mcp, "find_projects", { text: "tuberculosis", org_states: ["IL"], sort_by: "award_amount" });
     expect(isError).toBe(false);
     expect(calls[0].path).toBe("/projects/search");
     expect(calls[0].body).toMatchObject({
@@ -172,16 +173,16 @@ describe("MCP tools", () => {
     expect(text).toContain("https://reporter.nih.gov/project-details/10901234");
   });
 
-  it("search_projects refuses an empty search", async () => {
+  it("find_projects refuses an empty search", async () => {
     const { client, calls } = fakeApi(() => page([]));
-    const { isError } = await call(await connect(client), "search_projects", {});
+    const { isError } = await call(await connect(client), "find_projects", {});
     expect(isError).toBe(true);
     expect(calls).toHaveLength(0);
   });
 
   it("surfaces API errors as tool errors, not crashes", async () => {
     const { client } = fakeApi(() => new Response("Invalid criteria", { status: 400 }));
-    const { text, isError } = await call(await connect(client), "search_projects", { fiscal_years: [2025] });
+    const { text, isError } = await call(await connect(client), "find_projects", { fiscal_years: [2025] });
     expect(isError).toBe(true);
     expect(text).toContain("HTTP 400");
   });
@@ -275,3 +276,79 @@ describe("MCP tools", () => {
     expect(text).toContain("R01AI000001: 2 PMIDs: 36000002, 35000001");
   });
 });
+
+async function callRaw(mcp: Client, args: Record<string, unknown>) {
+  const res: any = await mcp.callTool({ name: "search_projects", arguments: args });
+  return { text: res.content[0].text as string, isError: !!res.isError };
+}
+
+const rawFake = (handler: (body: any) => unknown) => fakeApi((_path, body) => handler(body));
+
+const record = {
+  project_num: "5R01AI000001-02",
+  fiscal_year: 2025,
+  activity_code: "R01",
+  project_title: "TB preventive therapy in children",
+  organization: { org_name: "UNIVERSITY OF ILLINOIS AT CHICAGO" },
+  principal_investigators: [{ profile_id: 111, first_name: "Jane", last_name: "Smith", is_contact_pi: true }],
+  project_start_date: "2024-04-01T00:00:00",
+  project_end_date: "2029-03-31T00:00:00",
+};
+
+describe("search_projects (raw passthrough)", () => {
+  it("passes criteria through as-is, including keys the schema doesn't name", async () => {
+    const reply = { meta: { total: 1234, offset: 500, limit: 500 }, results: [record] };
+    const { client, calls } = rawFake(() => reply);
+    const criteria = {
+      pi_names: [
+        { first_name: "Jane", last_name: "Smith" },
+        { first_name: "Ravi", last_name: "Patel" },
+      ],
+      pi_profile_ids: [111, 222],
+      org_names: ["UNIVERSITY OF ILLINOIS"],
+      fiscal_years: [2024, 2025],
+      project_end_date: { from_date: "2026-10-17", to_date: "2031-12-31" },
+      include_active_projects: true,
+      activity_codes: ["R01"],
+    };
+    const { text, isError } = await callRaw(await connect(client), { criteria, offset: 500 });
+    expect(isError).toBe(false);
+    expect(calls[0].path).toBe("/projects/search");
+    expect(calls[0].body).toEqual({ criteria, offset: 500, limit: 500, include_fields: DEFAULT_FIELDS });
+    expect(JSON.parse(text)).toEqual(reply);
+  });
+
+  it("passes include_fields, sort, and limit through; [] means all fields", async () => {
+    const { client, calls } = rawFake(() => ({ meta: { total: 0, offset: 0, limit: 10 }, results: [] }));
+    const mcp = await connect(client);
+    await callRaw(mcp, { criteria: { fiscal_years: [2025] }, include_fields: ["ProjectNum", "IsActive"], limit: 10, sort_field: "fiscal_year", sort_order: "asc" });
+    expect(calls[0].body).toEqual({
+      criteria: { fiscal_years: [2025] },
+      offset: 0,
+      limit: 10,
+      include_fields: ["ProjectNum", "IsActive"],
+      sort_field: "fiscal_year",
+      sort_order: "asc",
+    });
+    await callRaw(mcp, { criteria: { fiscal_years: [2025] }, include_fields: [] });
+    expect(calls[1].body).not.toHaveProperty("include_fields");
+  });
+
+  it("rejects limit over 500, empty criteria, and paging past 15,000 without calling the API", async () => {
+    const { client, calls } = rawFake(() => ({}));
+    const mcp = await connect(client);
+    expect((await callRaw(mcp, { criteria: { fiscal_years: [2025] }, limit: 501 })).isError).toBe(true);
+    expect((await callRaw(mcp, { criteria: {} })).isError).toBe(true);
+    expect((await callRaw(mcp, { criteria: { fiscal_years: [2025] }, offset: 14_800, limit: 500 })).text).toContain("15,000");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("returns RePORTER's error text as a tool error", async () => {
+    const { client } = rawFake(() => new Response('{"error":"pi_names invalid"}', { status: 400 }));
+    const { text, isError } = await callRaw(await connect(client), { criteria: { pi_names: [{ last_name: "Smith" }] } });
+    expect(isError).toBe(true);
+    expect(text).toContain("HTTP 400");
+    expect(text).toContain("pi_names invalid");
+  });
+});
+

@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { icAbbrev, orgLine, personName, projectDetail, projectSummary, projectUrl, usd } from "./format.js";
-import { MAX_OFFSET, type Project, ReporterClient, ReporterError } from "./reporter.js";
+import { MAX_LIMIT, MAX_OFFSET, type Project, ReporterClient, ReporterError } from "./reporter.js";
 
 // Abstracts and term lists are most of each record's size; leave them out unless we show them.
 const SLIM = ["AbstractText", "PhrText", "Terms", "PrefTerms"];
@@ -15,7 +15,8 @@ How the data is shaped:
 - NIH fiscal year N runs Oct 1 of N-1 through Sep 30 of N.
 
 Picking a tool:
-- search_projects: find grants by topic, PI, organization, place, IC, mechanism, year.
+- search_projects: raw passthrough to the RePORTER search API. Returns the API's JSON ({meta, results}) for bulk pulls, e.g. many PIs per call via pi_names. Page with offset/limit (max 500) until offset + results.length >= meta.total.
+- find_projects: find grants by topic, PI, organization, place, IC, mechanism, year, with readable output.
 - get_project: full record (abstract, program officer, study section) plus year-by-year funding history.
 - summarize_funding: dollar totals grouped by IC, organization, state, year, mechanism, PI, or project. Use this instead of adding up search results by hand.
 - find_investigator: resolve a person's name to RePORTER profile IDs before searching by PI, so two people with the same name don't get merged.
@@ -118,6 +119,35 @@ export function toCoreProjectNum(num: string): string {
   return m ? m[1] : num.trim().toUpperCase();
 }
 
+export const DEFAULT_FIELDS = [
+  "ProjectNum",
+  "FiscalYear",
+  "ActivityCode",
+  "ProjectTitle",
+  "Organization",
+  "PrincipalInvestigators",
+  "ProjectStartDate",
+  "ProjectEndDate",
+];
+
+const rawPiName = z
+  .object({ first_name: z.string().optional(), last_name: z.string().optional(), any_name: z.string().optional() })
+  .loose();
+const rawDateRange = z.object({ from_date: z.string().optional(), to_date: z.string().optional() }).loose();
+
+// Named keys get schema hints; anything else RePORTER accepts passes through untouched.
+const rawCriteria = z
+  .object({
+    pi_names: z.array(rawPiName).optional().describe("PIs to match, e.g. [{first_name: 'Jane', last_name: 'Smith'}, ...]. Entries are OR'd."),
+    pi_profile_ids: z.array(z.number().int()).optional(),
+    org_names: z.array(z.string()).optional(),
+    fiscal_years: z.array(z.number().int()).optional(),
+    project_end_date: rawDateRange.optional().describe("{from_date, to_date} as YYYY-MM-DD."),
+    include_active_projects: z.boolean().optional(),
+  })
+  .loose()
+  .describe("RePORTER criteria object, passed through as-is. Any other RePORTER criteria key is accepted too.");
+
 const text = (s: string) => ({ content: [{ type: "text" as const, text: s }] });
 const fail = (s: string) => ({ content: [{ type: "text" as const, text: s }], isError: true });
 
@@ -167,7 +197,47 @@ export function buildServer(client = new ReporterClient()): McpServer {
   server.registerTool(
     "search_projects",
     {
-      title: "Search NIH-funded projects",
+      title: "Search NIH RePORTER projects (raw)",
+      description:
+        "Wraps POST https://api.reporter.nih.gov/v2/projects/search. criteria, include_fields, offset, limit, and sort are passed through as-is; the reply is the API's JSON with meta.total. If include_fields is omitted it defaults to ProjectNum, FiscalYear, ActivityCode, ProjectTitle, Organization, PrincipalInvestigators, ProjectStartDate, ProjectEndDate. Pass include_fields: [] for all fields. pi_names takes many people per call; results include every PI on a matching project, so match people back by profile_id or name.",
+      inputSchema: {
+        criteria: rawCriteria,
+        include_fields: z.array(z.string()).optional().describe("RePORTER field names in PascalCase, e.g. 'ProjectNum'."),
+        exclude_fields: z.array(z.string()).optional(),
+        offset: z.number().int().min(0).max(MAX_OFFSET).optional().describe("Default 0."),
+        limit: z.number().int().min(1).max(MAX_LIMIT).optional().describe("Default 500 (the API maximum)."),
+        sort_field: z.string().optional(),
+        sort_order: z.enum(["asc", "desc"]).optional(),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async (args) =>
+      guard(async () => {
+        if (Object.keys(args.criteria).length === 0) {
+          return fail("criteria is empty. That would return every NIH project since 1985; give at least one criterion.");
+        }
+        const offset = args.offset ?? 0;
+        const limit = args.limit ?? MAX_LIMIT;
+        if (offset + limit > MAX_OFFSET + 1) {
+          return fail(`offset + limit is ${offset + limit}; RePORTER stops at 15,000. Narrow the criteria and page within each slice.`);
+        }
+        const res = await client.searchProjects({
+          criteria: args.criteria,
+          offset,
+          limit,
+          include_fields: args.include_fields ?? DEFAULT_FIELDS,
+          exclude_fields: args.exclude_fields,
+          sort_field: args.sort_field,
+          sort_order: args.sort_order,
+        });
+        return text(JSON.stringify(res));
+      }),
+  );
+
+  server.registerTool(
+    "find_projects",
+    {
+      title: "Find NIH-funded projects",
       description:
         "Search NIH RePORTER for funded projects by topic, investigator, organization, location, institute, mechanism, or year. Returns one line-block per project-year with PI, organization, IC, mechanism, amount, dates, and a RePORTER link.",
       inputSchema: {
