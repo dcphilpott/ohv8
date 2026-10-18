@@ -96,6 +96,7 @@ describe("toCoreProjectNum", () => {
     ["1K23HD098765-01A1", "K23HD098765"],
     ["r01ai123456", "R01AI123456"],
     ["ZIAAI000001", "ZIAAI000001"],
+    ["1ZIAAI000883-22", "ZIAAI000883"],
   ])("%s -> %s", (input, out) => expect(toCoreProjectNum(input)).toBe(out));
 });
 
@@ -152,7 +153,7 @@ describe("MCP tools", () => {
   it("find_projects sends slim criteria and formats results", async () => {
     const { client, calls } = fakeApi(() => ({
       ...page([proj({ appl_id: 10901234 })], 37),
-      meta: { total: 37, offset: 0, limit: 25, properties: { URL: "https://reporter.nih.gov/search/abc/projects" } },
+      meta: { total: 37, offset: 0, limit: 25, properties: { URL: "https:/reporter.nih.gov/search/abc/projects" } },
     }));
     const mcp = await connect(client);
     const { text, isError } = await call(mcp, "find_projects", { text: "tuberculosis", org_states: ["IL"], sort_by: "award_amount" });
@@ -245,7 +246,7 @@ describe("MCP tools", () => {
       return page([y1, y2, sub, other]);
     });
     const { text } = await call(await connect(client), "get_project", { project_num: "5r01ai000001-02" });
-    expect(calls.map((c) => c.body.criteria.project_nums[0])).toEqual(["5R01AI000001-02", "*R01AI000001*"]);
+    expect(calls.map((c) => c.body.criteria.project_nums[0])).toEqual(["5R01AI000001-02", "R01AI000001"]);
     expect(text).toContain("# TB preventive therapy in children");
     expect(text).toContain("Program officer: Lee, Pat <pat.lee@nih.gov>");
     expect(text).toContain("We will test 3HP in children.");

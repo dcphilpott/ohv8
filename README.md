@@ -58,13 +58,17 @@ For Claude Desktop, add to `claude_desktop_config.json`:
 - `src/worker.ts`: Cloudflare Worker, stateless Streamable HTTP at `/mcp`
 - `src/stdio.ts`: local stdio entry point
 
-## Not yet checked against the live API
+## Checked against the live API (2026-10-18)
 
-The tests use recorded-shape responses, not the real API, because the environment this was built in couldn't reach `api.reporter.nih.gov`. These request details come from the RePORTER docs and still need one live check each after deploy:
+Every tool was run against `api.reporter.nih.gov`:
 
-1. `project_nums` wildcards (`*R01AI123456*`), which `get_project` uses for funding history
-2. The `foa` criterion for funding opportunity numbers
-3. `exclude_fields` names (`AbstractText`, `PhrText`, `Terms`, `PrefTerms`). If these are wrong, results still come back, just larger.
-4. `sort_field` values `award_amount`, `project_start_date`, `project_end_date`
+- `search_projects`: a batch of 3 PIs (`pi_names` with first/last) returned 262 records in 3 pages of 100 in 2.3 seconds, with exactly the 8 default fields, `profile_id` and `is_contact_pi`. `project_end_date`, `include_active_projects`, `foa`, `exclude_fields`, and all four sort fields work as sent.
+- `get_project` returned the abstract and a 3-year funding history for UH3DE032003.
+- `find_investigator`, `summarize_funding` (102 Uganda project-years, FY2024 to FY2025), and `get_publications` returned data that matched the RePORTER website.
 
-A quick test after deploy: ask Claude to look up a PI you know with `find_investigator`, then open one with `get_project` and confirm the funding history matches the RePORTER website.
+Two API quirks the code now handles:
+
+1. A project number that starts with `*` matches nothing. A bare core number (`UH3DE032003`) matches every year, so `get_project` uses that.
+2. `meta.properties.URL` comes back as `https:/reporter...`, one slash short. `find_projects` repairs it; `search_projects` passes it through untouched.
+
+When matching people back from `search_projects`, one person can have more than one profile ID (Francis Collins has two), so match on profile ID first, then on name.

@@ -57,7 +57,7 @@ const filterShape = {
   project_nums: z
     .array(z.string())
     .optional()
-    .describe('Project numbers. Full ("5R01AI123456-03") or with * wildcards ("*R01AI123456*").'),
+    .describe('Project numbers. Full ("5R01AI123456-03"), core ("R01AI123456", matches every year), or with a trailing * ("5R01AI123456*"). A leading * matches nothing.'),
   funding_opportunities: z.array(z.string()).optional().describe('Funding opportunity numbers, e.g. "PAR-21-123", "RFA-AI-22-045".'),
   project_start_from: z.string().optional().describe("Project start date on or after (YYYY-MM-DD)."),
   project_start_to: z.string().optional().describe("Project start date on or before (YYYY-MM-DD)."),
@@ -113,9 +113,9 @@ export function buildCriteria(f: Filters): Record<string, unknown> {
   return c;
 }
 
-// "5R01AI123456-03" -> "R01AI123456"; leaves anything it doesn't recognize alone.
+// "5R01AI123456-03" -> "R01AI123456", "1ZIAAI000883-22" -> "ZIAAI000883"; leaves anything it doesn't recognize alone.
 export function toCoreProjectNum(num: string): string {
-  const m = num.trim().toUpperCase().match(/^\d?([A-Z]\d{2}[A-Z]{2}\d{6})(?:-.*)?$/);
+  const m = num.trim().toUpperCase().match(/^\d?([A-Z][A-Z0-9]{2}[A-Z]{2}\d{6})(?:-.*)?$/);
   return m ? m[1] : num.trim().toUpperCase();
 }
 
@@ -272,7 +272,9 @@ export function buildServer(client = new ReporterClient()): McpServer {
         const header = `${total.toLocaleString("en-US")} matching project-year records; showing ${shown}.${
           offset + res.results.length < total ? " Use offset to see more, or summarize_funding for totals." : ""
         }`;
-        const link = res.meta.properties?.URL ? `\nSame search on the RePORTER website: ${res.meta.properties.URL}` : "";
+        // RePORTER sends this as "https:/reporter.nih.gov/...", one slash short.
+        const site = res.meta.properties?.URL?.replace(/^https:\/(?!\/)/, "https://");
+        const link = site ? `\nSame search on the RePORTER website: ${site}` : "";
         return text(`${header}${link}\n\n${res.results.map(projectSummary).join("\n\n")}`);
       }),
   );
@@ -300,7 +302,8 @@ export function buildServer(client = new ReporterClient()): McpServer {
         } else {
           const num = project_num!.trim().toUpperCase();
           const isCore = toCoreProjectNum(num) === num && !num.includes("*");
-          const patterns = isCore ? [`*${num}*`] : [num, `*${toCoreProjectNum(num)}*`];
+          // RePORTER matches a bare core number against every year; a leading * matches nothing.
+          const patterns = isCore ? [num] : [num, toCoreProjectNum(num)];
           for (const pattern of patterns) {
             const res = await client.searchProjects({
               criteria: { project_nums: [pattern] },
@@ -321,7 +324,7 @@ export function buildServer(client = new ReporterClient()): McpServer {
         const core = record.core_project_num;
         if (include_history && core) {
           const { results } = await client.collectProjects(
-            { criteria: { project_nums: [`*${core}*`] }, exclude_fields: SLIM, sort_field: "fiscal_year", sort_order: "asc" },
+            { criteria: { project_nums: [core] }, exclude_fields: SLIM, sort_field: "fiscal_year", sort_order: "asc" },
             200,
           );
           const years = results
